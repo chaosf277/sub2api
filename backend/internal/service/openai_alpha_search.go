@@ -228,7 +228,7 @@ func openAIAlphaSearchSchedulingModel(account *Account, requestedModel string) s
 }
 
 func (s *OpenAIGatewayService) buildOpenAIAlphaSearchResponsesWebSearchRequest(ctx context.Context, c *gin.Context, account *Account, alphaBody []byte, body []byte, token string) (*http.Request, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, chatgptCodexURL, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.chatGPTCodexURL(), bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
