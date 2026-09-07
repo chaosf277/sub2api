@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
@@ -479,4 +480,22 @@ func TestCodexOutboundIdentityCaptureMatchesAcrossHTTPPassthroughAndWS(t *testin
 	require.Equal(t, httpSnap.ThreadID, gotHeader.Get("x-client-request-id"))
 	require.Equal(t, promptCacheKey, gjson.GetBytes(gotBody, "prompt_cache_key").String())
 	require.Equal(t, promptCacheKey, gjson.GetBytes(gotBody, "client_metadata.session_id").String())
+}
+
+func TestResolveChatGPTCodexURLUsesDebugOverride(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	require.Equal(t, chatgptCodexURL, resolveChatGPTCodexURL(nil))
+	require.Equal(t, chatgptCodexURL, resolveChatGPTCodexURL(&config.Config{}))
+	override := "http://127.0.0.1:9977/backend-api/codex/responses"
+	svc := &OpenAIGatewayService{cfg: &config.Config{Gateway: config.GatewayConfig{DebugCodexUpstreamURL: override}}}
+	require.Equal(t, override, svc.chatGPTCodexURL())
+
+	body := []byte(`{"model":"gpt-5.6-codex","stream":true}`)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+	account := &Account{ID: 11, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Credentials: map[string]any{"chatgpt_account_id": "chatgpt-account-11"}}
+	req, err := svc.buildUpstreamRequest(context.Background(), c, account, body, "oauth-token", true, "client-session", true)
+	require.NoError(t, err)
+	require.Equal(t, override, req.URL.String())
 }
