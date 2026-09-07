@@ -254,8 +254,8 @@ func applyCodexAccountIdentityHeaders(headers http.Header, account *Account, api
 		return
 	}
 	for _, field := range codexAccountIdentityFields {
-		// Underscore session/conversation headers are rebuilt separately from the
-		// prompt cache key by each request builder.
+		// Underscore session_id is rebuilt from the scoped session-id by
+		// finalizeCodexOutboundIdentityHeaders after fingerprint convergence.
 		if field.name == "session_id" {
 			continue
 		}
@@ -271,5 +271,27 @@ func applyCodexAccountIdentityHeaders(headers http.Header, account *Account, api
 				headers.Set(openAIWSTurnMetadataHeader, string(rebuilt))
 			}
 		}
+	}
+}
+
+// finalizeCodexOutboundIdentityHeaders projects official Codex client invariants
+// onto outbound headers after account namespacing and optional fingerprint
+// convergence. True Codex emits session-id / thread-id / x-client-request-id
+// from one snapshot (x-client-request-id == thread-id) and does not send the
+// underscore session_id / conversation_id aliases. Sub2API still sends those
+// aliases for older relays and cross-user isolation; they must reuse the
+// already-scoped hyphen session-id instead of a second hash.
+func finalizeCodexOutboundIdentityHeaders(headers http.Header, account *Account) {
+	if headers == nil || codexAccountIdentityNamespace(account) == "" {
+		return
+	}
+	if sessionID := strings.TrimSpace(headers.Get("session-id")); sessionID != "" {
+		headers.Set("session_id", sessionID)
+		if strings.TrimSpace(headers.Get("conversation_id")) != "" {
+			headers.Set("conversation_id", sessionID)
+		}
+	}
+	if threadID := strings.TrimSpace(headers.Get("thread-id")); threadID != "" {
+		headers.Set("x-client-request-id", threadID)
 	}
 }
