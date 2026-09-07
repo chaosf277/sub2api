@@ -70,6 +70,22 @@ const (
 	openAICodexAutoPauseStaleAfter = 2 * time.Hour
 )
 
+func resolveChatGPTCodexURL(cfg *config.Config) string {
+	if cfg != nil {
+		if u := strings.TrimSpace(cfg.Gateway.DebugCodexUpstreamURL); u != "" {
+			return u
+		}
+	}
+	return chatgptCodexURL
+}
+
+func (s *OpenAIGatewayService) chatGPTCodexURL() string {
+	if s == nil {
+		return chatgptCodexURL
+	}
+	return resolveChatGPTCodexURL(s.cfg)
+}
+
 // OpenAI allowed headers whitelist (for non-passthrough).
 var openaiAllowedHeaders = map[string]bool{
 	"accept-language":         true,

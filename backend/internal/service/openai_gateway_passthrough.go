@@ -585,10 +585,10 @@ func (s *OpenAIGatewayService) buildUpstreamRequestOpenAIPassthrough(
 	targetURL := openaiPlatformAPIURL
 	switch account.Type {
 	case AccountTypeOAuth:
-		targetURL = chatgptCodexURL
+		targetURL = s.chatGPTCodexURL()
 	case AccountTypeSetupToken:
 		if account.IsOpenAIOAuthLike() {
-			targetURL = chatgptCodexURL
+			targetURL = s.chatGPTCodexURL()
 		}
 	case AccountTypeAPIKey:
 		baseURL := account.GetOpenAIBaseURL()

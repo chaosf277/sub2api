@@ -977,6 +977,10 @@ type GatewayConfig struct {
 	// ForceCodexCLI: 强制将 OpenAI `/v1/responses` 请求按 Codex CLI 处理。
 	// 用于网关未透传/改写 User-Agent 时的兼容兜底（默认关闭，避免影响其他客户端）。
 	ForceCodexCLI bool `mapstructure:"force_codex_cli"`
+	// DebugCodexUpstreamURL overrides the ChatGPT Codex OAuth upstream URL.
+	// Empty keeps https://chatgpt.com/backend-api/codex/responses. Use only
+	// for intercept/staging; production must stay empty.
+	DebugCodexUpstreamURL string `mapstructure:"debug_codex_upstream_url"`
 	// DisableCodexIdentityEnforcement: 关闭「强制统一 Codex 出站身份」。上游 /backend-api/codex
 	// 在容量紧张时按客户端身份分优先级降载，被降载的请求会拿到 HTTP 200 + 流内
 	// server_is_overloaded，该次请求失败。默认强制统一出口：所有 OAuth 出站的
@@ -2707,6 +2711,9 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("api_key_auth_cache.invalid_abuse.capacity must be between 256 and 1000000")
 		}
 	}
+	if err := validateDebugCodexUpstreamURL(c.Gateway.DebugCodexUpstreamURL); err != nil {
+		return err
+	}
 	jwtSecret := strings.TrimSpace(c.JWT.Secret)
 	if jwtSecret == "" {
 		return fmt.Errorf("jwt.secret is required")
@@ -3775,6 +3782,17 @@ func GetServerAddress() string {
 }
 
 // ValidateAbsoluteHTTPURL 验证是否为有效的绝对 HTTP(S) URL
+func validateDebugCodexUpstreamURL(raw string) error {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	if err := ValidateAbsoluteHTTPURL(raw); err != nil {
+		return fmt.Errorf("gateway.debug_codex_upstream_url invalid: %w", err)
+	}
+	return nil
+}
+
 func ValidateAbsoluteHTTPURL(raw string) error {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {

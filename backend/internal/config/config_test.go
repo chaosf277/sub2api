@@ -1322,6 +1322,18 @@ func TestValidateAbsoluteHTTPURL(t *testing.T) {
 	}
 }
 
+func TestValidateDebugCodexUpstreamURL(t *testing.T) {
+	if err := validateDebugCodexUpstreamURL(""); err != nil {
+		t.Fatalf("empty debug url should be allowed: %v", err)
+	}
+	if err := validateDebugCodexUpstreamURL("http://127.0.0.1:9977/backend-api/codex/responses"); err != nil {
+		t.Fatalf("local echo url should be allowed: %v", err)
+	}
+	if err := validateDebugCodexUpstreamURL("/relative"); err == nil {
+		t.Fatalf("relative debug url should be rejected")
+	}
+}
+
 func TestValidateServerFrontendURL(t *testing.T) {
 	resetViperWithJWTSecret(t)
 

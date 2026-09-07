@@ -1,0 +1,63 @@
+name: rebase-upstream
+
+on:
+  schedule:
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  rebase:
+    if: github.repository != 'Wei-Shaw/sub2api'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Fetch upstream
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/Wei-Shaw/sub2api.git
+          git fetch origin
+          git fetch upstream main
+
+      - name: Rebase patch branch
+        id: rebase
+        run: |
+          git checkout -B fix/codex-outbound-identity-align origin/fix/codex-outbound-identity-align
+          git rebase upstream/main
+
+      - name: Setup Go
+        if: success()
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+
+      - name: Focused identity tests
+        if: success()
+        working-directory: backend
+        run: |
+          go version | grep -q 'go1.27.0'
+          go test -tags=unit ./internal/service -count=1 -timeout=180s \
+            -run 'TestFinalizeCodexOutboundIdentityHeaders|TestOpenAIAllowedHeadersIncludeCodexSessionAliases|TestBuildUpstreamRequestAlignsOfficialCodexSessionHeaders|TestBuildOpenAIWSHeadersAlignsOfficialCodexSessionHeaders|TestBuildUpstreamRequestOpenAIPassthroughAlignsOfficialCodexSessionHeaders|TestCodexOutboundIdentityCaptureMatchesAcrossHTTPPassthroughAndWS|TestResolveChatGPTCodexURL'
+
+      - name: Push rebased branch
+        if: success()
+        run: git push --force-with-lease origin HEAD:fix/codex-outbound-identity-align
+
+      - name: Open conflict issue
+        if: failure() && steps.rebase.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          title="rebase conflict: fix/codex-outbound-identity-align onto upstream/main"
+          if gh issue list --search "$title" --state open --json number --jq 'length' | grep -qx 0; then
+            gh issue create --title "$title" --body "Scheduled rebase of \`fix/codex-outbound-identity-align\` onto \`Wei-Shaw/sub2api\` main failed. Inspect the workflow log and resolve locally."
+          fi

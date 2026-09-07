@@ -1,4 +1,4 @@
-.PHONY: build generate test test-unit test-integration test-e2e
+.PHONY: build generate test test-unit test-integration test-e2e codex-identity-probe
 
 VERSION ?= $(shell ./scripts/resolve-version.sh)
 LDFLAGS ?= -s -w -X main.Version=$(VERSION)
@@ -16,6 +16,9 @@ test:
 
 test-unit:
 	go test -tags=unit ./...
+
+codex-identity-probe:
+	go test -tags=unit ./internal/service -count=1 -v -run TestCodexOutboundIdentityCaptureMatchesAcrossHTTPPassthroughAndWS
 
 test-integration:
 	go test -tags=integration ./...
