@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -359,4 +360,123 @@ func countRunes(s string, r rune) int {
 		}
 	}
 	return n
+}
+
+type codexOutboundIdentitySnap struct {
+	SessionHyphen     string
+	SessionUnderscore string
+	ConversationID    string
+	ThreadID          string
+	ClientRequestID   string
+}
+
+func readCodexOutboundIdentitySnap(h http.Header) codexOutboundIdentitySnap {
+	return codexOutboundIdentitySnap{
+		SessionHyphen:     h.Get("session-id"),
+		SessionUnderscore: h.Get("session_id"),
+		ConversationID:    h.Get("conversation_id"),
+		ThreadID:          h.Get("thread-id"),
+		ClientRequestID:   h.Get("x-client-request-id"),
+	}
+}
+
+func TestCodexOutboundIdentityCaptureMatchesAcrossHTTPPassthroughAndWS(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	account := &Account{
+		ID:          11,
+		Platform:    PlatformOpenAI,
+		Type:        AccountTypeOAuth,
+		Credentials: map[string]any{"chatgpt_account_id": "chatgpt-account-11"},
+	}
+	const apiKeyID int64 = 77
+	body := []byte(`{"model":"gpt-5.6-codex","stream":true,"prompt_cache_key":"client-session","client_metadata":{"x-codex-installation-id":"client-installation","session_id":"client-session","thread_id":"client-thread","x-codex-window-id":"client-window"}}`)
+	rewritten, changed, err := applyCodexAccountIdentityClientMetadataRaw(body, account, apiKeyID)
+	require.NoError(t, err)
+	require.True(t, changed)
+	promptCacheKey := gjson.GetBytes(rewritten, "prompt_cache_key").String()
+	metaSessionID := gjson.GetBytes(rewritten, "client_metadata.session_id").String()
+	require.Equal(t, promptCacheKey, metaSessionID)
+	require.NotEqual(t, "client-session", promptCacheKey)
+
+	newClient := func() *gin.Context {
+		recorder := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(recorder)
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+		c.Set("api_key", &APIKey{ID: apiKeyID})
+		c.Request.Header.Set("User-Agent", "codex_cli_rs/0.144.0")
+		c.Request.Header.Set("originator", "codex_cli_rs")
+		c.Request.Header.Set("session-id", "client-session")
+		c.Request.Header.Set("thread-id", "client-thread")
+		c.Request.Header.Set("x-client-request-id", "client-request")
+		c.Request.Header.Set("x-codex-installation-id", "client-installation")
+		c.Request.Header.Set("x-codex-window-id", "client-window")
+		return c
+	}
+
+	svc := &OpenAIGatewayService{}
+	httpReq, err := svc.buildUpstreamRequest(context.Background(), newClient(), account, rewritten, "oauth-token", true, "client-session", true)
+	require.NoError(t, err)
+	passAccount := &Account{
+		ID:       account.ID,
+		Platform: account.Platform,
+		Type:     account.Type,
+		Credentials: map[string]any{
+			"chatgpt_account_id":       "chatgpt-account-11",
+			"openai_oauth_passthrough": true,
+		},
+	}
+	passReq, err := svc.buildUpstreamRequestOpenAIPassthrough(context.Background(), newClient(), passAccount, rewritten, "oauth-token")
+	require.NoError(t, err)
+	wsHeaders, _, err := svc.buildOpenAIWSHeaders(
+		context.Background(), newClient(), account, "oauth-token",
+		OpenAIWSProtocolDecision{Transport: OpenAIUpstreamTransportResponsesWebsocketV2},
+		true, "", "", "client-session", "", "",
+	)
+	require.NoError(t, err)
+
+	httpSnap := readCodexOutboundIdentitySnap(httpReq.Header)
+	passSnap := readCodexOutboundIdentitySnap(passReq.Header)
+	wsSnap := readCodexOutboundIdentitySnap(wsHeaders)
+	t.Logf("body.prompt_cache_key=%s client_metadata.session_id=%s", promptCacheKey, metaSessionID)
+	t.Logf("http %+v", httpSnap)
+	t.Logf("passthrough %+v", passSnap)
+	t.Logf("ws %+v", wsSnap)
+
+	for _, snap := range []codexOutboundIdentitySnap{httpSnap, passSnap, wsSnap} {
+		require.NotEmpty(t, snap.SessionHyphen)
+		require.Equal(t, snap.SessionHyphen, snap.SessionUnderscore)
+		require.Equal(t, snap.ThreadID, snap.ClientRequestID)
+		require.Equal(t, promptCacheKey, snap.SessionHyphen)
+	}
+	require.Equal(t, httpSnap.SessionHyphen, passSnap.SessionHyphen)
+	require.Equal(t, httpSnap.SessionHyphen, wsSnap.SessionHyphen)
+	require.Equal(t, httpSnap.ThreadID, passSnap.ThreadID)
+	require.Equal(t, httpSnap.ThreadID, wsSnap.ThreadID)
+	require.Equal(t, httpSnap.SessionHyphen, httpSnap.ConversationID)
+	require.Equal(t, passSnap.SessionHyphen, passSnap.ConversationID)
+	if wsSnap.ConversationID != "" {
+		require.Equal(t, wsSnap.SessionHyphen, wsSnap.ConversationID)
+	}
+
+	var gotHeader http.Header
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHeader = r.Header.Clone()
+		gotBody, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(server.Close)
+	wire, err := http.NewRequest(http.MethodPost, server.URL, bytes.NewReader(rewritten))
+	require.NoError(t, err)
+	wire.Header = httpReq.Header.Clone()
+	resp, err := server.Client().Do(wire)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+	require.Equal(t, httpSnap.SessionHyphen, gotHeader.Get("session-id"))
+	require.Equal(t, httpSnap.SessionHyphen, gotHeader.Get("session_id"))
+	require.Equal(t, httpSnap.SessionHyphen, gotHeader.Get("conversation_id"))
+	require.Equal(t, httpSnap.ThreadID, gotHeader.Get("thread-id"))
+	require.Equal(t, httpSnap.ThreadID, gotHeader.Get("x-client-request-id"))
+	require.Equal(t, promptCacheKey, gjson.GetBytes(gotBody, "prompt_cache_key").String())
+	require.Equal(t, promptCacheKey, gjson.GetBytes(gotBody, "client_metadata.session_id").String())
 }
