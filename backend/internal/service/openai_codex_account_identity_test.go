@@ -227,4 +227,136 @@ func TestBuildUpstreamRequestNamespacesCodexIdentityByOAuthAccount(t *testing.T)
 		require.NotEqual(t, first.Get(header), second.Get(header), "account failover must rotate upstream identity: %s", header)
 	}
 	require.GreaterOrEqual(t, checked, 5, "test must exercise the real outbound identity surface")
+	require.Equal(t, first.Get("session-id"), first.Get("session_id"))
+	require.Equal(t, first.Get("session-id"), first.Get("conversation_id"))
+	require.Equal(t, first.Get("thread-id"), first.Get("x-client-request-id"))
+	require.NotEqual(t, isolateOpenAIUpstreamSessionID(77, &Account{ID: 11, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Credentials: map[string]any{"chatgpt_account_id": "chatgpt-account-11"}}, "client-session"), first.Get("session_id"))
+}
+
+func TestFinalizeCodexOutboundIdentityHeadersReusesScopedSessionID(t *testing.T) {
+	headers := http.Header{}
+	headers.Set("session-id", "scoped-session")
+	headers.Set("session_id", "other-hash")
+	headers.Set("conversation_id", "other-hash")
+	headers.Set("thread-id", "scoped-thread")
+	headers.Set("x-client-request-id", "scoped-request")
+
+	account := &Account{ID: 11, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Credentials: map[string]any{"chatgpt_account_id": "chatgpt-account-11"}}
+	finalizeCodexOutboundIdentityHeaders(headers, account)
+
+	require.Equal(t, "scoped-session", headers.Get("session-id"))
+	require.Equal(t, "scoped-session", headers.Get("session_id"))
+	require.Equal(t, "scoped-session", headers.Get("conversation_id"))
+	require.Equal(t, "scoped-thread", headers.Get("thread-id"))
+	require.Equal(t, "scoped-thread", headers.Get("x-client-request-id"))
+}
+
+func TestFinalizeCodexOutboundIdentityHeadersSkipsAPIKeyAccounts(t *testing.T) {
+	headers := http.Header{}
+	headers.Set("session-id", "client-session")
+	headers.Set("session_id", "isolated-hash")
+	finalizeCodexOutboundIdentityHeaders(headers, &Account{ID: 11, Platform: PlatformOpenAI, Type: AccountTypeAPIKey})
+	require.Equal(t, "isolated-hash", headers.Get("session_id"))
+}
+
+func TestOpenAIAllowedHeadersIncludeCodexSessionAliases(t *testing.T) {
+	for _, header := range []string{"session-id", "thread-id", "x-client-request-id"} {
+		require.True(t, openaiAllowedHeaders[header], header)
+		require.True(t, openaiPassthroughAllowedHeaders[header], header)
+	}
+}
+
+func TestBuildUpstreamRequestAlignsOfficialCodexSessionHeaders(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	body := []byte(`{"model":"gpt-5.6-codex","stream":true,"prompt_cache_key":"client-session"}`)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+	c.Set("api_key", &APIKey{ID: 77})
+	c.Request.Header.Set("User-Agent", "codex_cli_rs/0.144.0")
+	c.Request.Header.Set("session-id", "client-session")
+	c.Request.Header.Set("thread-id", "client-thread")
+	c.Request.Header.Set("x-client-request-id", "client-request")
+
+	account := &Account{
+		ID:          11,
+		Platform:    PlatformOpenAI,
+		Type:        AccountTypeOAuth,
+		Credentials: map[string]any{"chatgpt_account_id": "chatgpt-account-11"},
+	}
+	req, err := (&OpenAIGatewayService{}).buildUpstreamRequest(context.Background(), c, account, body, "oauth-token", true, "client-session", true)
+	require.NoError(t, err)
+
+	require.Equal(t, req.Header.Get("session-id"), req.Header.Get("session_id"))
+	require.Equal(t, req.Header.Get("session-id"), req.Header.Get("conversation_id"))
+	require.Equal(t, req.Header.Get("thread-id"), req.Header.Get("x-client-request-id"))
+	require.NotEqual(t, "client-session", req.Header.Get("session-id"))
+	require.NotEqual(t, isolateOpenAIUpstreamSessionID(77, account, "client-session"), req.Header.Get("session_id"))
+	require.Equal(t, 4, countRunes(req.Header.Get("session_id"), '-'))
+}
+
+func TestBuildOpenAIWSHeadersAlignsOfficialCodexSessionHeaders(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodGet, "/v1/responses", nil)
+	c.Set("api_key", &APIKey{ID: 77})
+	c.Request.Header.Set("session-id", "client-session")
+	c.Request.Header.Set("thread-id", "client-thread")
+	c.Request.Header.Set("x-client-request-id", "client-request")
+
+	account := &Account{
+		ID:          11,
+		Platform:    PlatformOpenAI,
+		Type:        AccountTypeOAuth,
+		Credentials: map[string]any{"chatgpt_account_id": "chatgpt-account-11"},
+	}
+	headers, _, err := (&OpenAIGatewayService{}).buildOpenAIWSHeaders(
+		context.Background(), c, account, "token",
+		OpenAIWSProtocolDecision{Transport: OpenAIUpstreamTransportResponsesWebsocketV2},
+		true, "", "", "client-session", "", "",
+	)
+	require.NoError(t, err)
+	require.Equal(t, headers.Get("session-id"), headers.Get("session_id"))
+	require.Equal(t, headers.Get("thread-id"), headers.Get("x-client-request-id"))
+	require.NotEqual(t, isolateOpenAIUpstreamSessionID(77, account, "client-session"), headers.Get("session_id"))
+}
+
+func TestBuildUpstreamRequestOpenAIPassthroughAlignsOfficialCodexSessionHeaders(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	body := []byte(`{"model":"gpt-5.6-codex","stream":true,"prompt_cache_key":"client-session"}`)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+	c.Set("api_key", &APIKey{ID: 77})
+	c.Request.Header.Set("session-id", "client-session")
+	c.Request.Header.Set("thread-id", "client-thread")
+	c.Request.Header.Set("x-client-request-id", "client-request")
+	c.Request.Header.Set("originator", "codex_cli_rs")
+
+	account := &Account{
+		ID:       11,
+		Platform: PlatformOpenAI,
+		Type:     AccountTypeOAuth,
+		Credentials: map[string]any{
+			"chatgpt_account_id":       "chatgpt-account-11",
+			"openai_oauth_passthrough": true,
+		},
+	}
+	req, err := (&OpenAIGatewayService{}).buildUpstreamRequestOpenAIPassthrough(context.Background(), c, account, body, "oauth-token")
+	require.NoError(t, err)
+	require.Equal(t, req.Header.Get("session-id"), req.Header.Get("session_id"))
+	require.Equal(t, req.Header.Get("session-id"), req.Header.Get("conversation_id"))
+	require.Equal(t, req.Header.Get("thread-id"), req.Header.Get("x-client-request-id"))
+	require.NotEqual(t, isolateOpenAIUpstreamSessionID(77, account, "client-session"), req.Header.Get("session_id"))
+}
+
+func countRunes(s string, r rune) int {
+	n := 0
+	for _, c := range s {
+		if c == r {
+			n++
+		}
+	}
+	return n
 }
