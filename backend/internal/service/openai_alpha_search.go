@@ -68,7 +68,7 @@ func (s *OpenAIGatewayService) ForwardAlphaSearch(ctx context.Context, c *gin.Co
 	// 拒绝为 no_matching_rule。对 PAT 账号使用等价的 hosted web_search
 	// Responses 路径兜底，避免把可用账号误判为搜索不可用。
 	if account.IsOpenAIPersonalAccessToken() {
-		return s.forwardAlphaSearchViaResponsesWebSearch(ctx, c, account, body, token, proxyURL, requestedModel, upstreamModel)
+		return s.forwardAlphaSearchViaResponsesWebSearch(ctx, c, account, body, token, requestedModel, upstreamModel)
 	}
 
 	req, err := s.buildOpenAIAlphaSearchRequest(ctx, c, account, body, token)
@@ -143,7 +143,6 @@ func (s *OpenAIGatewayService) forwardAlphaSearchViaResponsesWebSearch(
 	account *Account,
 	alphaBody []byte,
 	token string,
-	proxyURL string,
 	requestedModel string,
 	upstreamModel string,
 ) (*OpenAIForwardResult, error) {
@@ -159,6 +158,7 @@ func (s *OpenAIGatewayService) forwardAlphaSearchViaResponsesWebSearch(
 		return nil, err
 	}
 	SetActualOpenAIUpstreamEndpoint(c, "/v1/responses")
+	proxyURL := s.openAIResponsesProxyURL(account)
 
 	upstreamStart := time.Now()
 	resp, err := s.doOpenAIUpstream(req, proxyURL, account)
@@ -243,7 +243,7 @@ func (s *OpenAIGatewayService) buildOpenAIAlphaSearchResponsesWebSearchRequest(c
 			req.Header.Add(key, value)
 		}
 	}
-	req.Host = "chatgpt.com"
+	req.Host = req.URL.Host
 	if err := resolveAndSetOpenAIChatGPTAccountHeaders(ctx, s.accountRepo, req.Header, account); err != nil {
 		return nil, fmt.Errorf("resolve chatgpt account headers: %w", err)
 	}
@@ -391,7 +391,7 @@ func (s *OpenAIGatewayService) buildOpenAIAlphaSearchRequest(ctx context.Context
 	req.Header.Set("Accept", "application/json")
 
 	if account.Type == AccountTypeOAuth {
-		req.Host = "chatgpt.com"
+		req.Host = req.URL.Host
 		if err := resolveAndSetOpenAIChatGPTAccountHeaders(ctx, s.accountRepo, req.Header, account); err != nil {
 			return nil, fmt.Errorf("resolve chatgpt account headers: %w", err)
 		}
