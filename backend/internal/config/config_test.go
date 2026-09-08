@@ -2622,3 +2622,12 @@ func TestLoad_DefaultGatewayImageStreamConfig(t *testing.T) {
 		t.Fatalf("image stream timeout = %d, want greater than ordinary stream timeout %d", cfg.Gateway.ImageStreamDataIntervalTimeout, cfg.Gateway.StreamDataIntervalTimeout)
 	}
 }
+
+func TestLoadDebugCodexUpstreamURLFromEnv(t *testing.T) {
+	resetViperWithJWTSecret(t)
+	const target = "http://127.0.0.1:9977/backend-api/codex/responses"
+	t.Setenv("GATEWAY_DEBUG_CODEX_UPSTREAM_URL", target)
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.Equal(t, target, cfg.Gateway.DebugCodexUpstreamURL)
+}

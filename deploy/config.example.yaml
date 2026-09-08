@@ -258,7 +258,8 @@ gateway:
   #
   # 注意：开启后会影响所有客户端的行为（不仅限于 VS Code / Codex CLI），请谨慎开启。
   force_codex_cli: false
-  # Debug-only: send Codex OAuth upstream to a local echo instead of chatgpt.com.
+  # Debug-only: send Codex OAuth Responses upstream directly to a local echo, bypassing account proxies.
+  # Applies to HTTP and WebSocket Responses; other endpoints keep their normal routing.
   # 调试用：把 Codex OAuth 出站指到本地回显，生产环境必须留空。
   # Example: http://127.0.0.1:9977/backend-api/codex/responses
   debug_codex_upstream_url: ""

@@ -499,3 +499,137 @@ func TestResolveChatGPTCodexURLUsesDebugOverride(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, override, req.URL.String())
 }
+
+func TestCodexOutboundIdentityWithoutNamespaceIsolatesAPIKeys(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, transport := range []string{"http", "passthrough", "ws"} {
+		t.Run(transport, func(t *testing.T) {
+			account := &Account{ID: 11, Platform: PlatformOpenAI, Type: AccountTypeOAuth}
+			var snapshots []http.Header
+			for _, id := range []int64{77, 88} {
+				body := []byte(`{"model":"gpt-5.6-codex","prompt_cache_key":"client-session"}`)
+				c, _ := gin.CreateTestContext(httptest.NewRecorder())
+				c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+				c.Set("api_key", &APIKey{ID: id})
+				c.Request.Header.Set("session-id", "client-session")
+				c.Request.Header.Set("thread-id", "client-thread")
+				c.Request.Header.Set("x-client-request-id", "client-request")
+				svc := &OpenAIGatewayService{}
+				var headers http.Header
+				if transport == "ws" {
+					var err error
+					headers, _, err = svc.buildOpenAIWSHeaders(context.Background(), c, account, "fixture-token", OpenAIWSProtocolDecision{Transport: OpenAIUpstreamTransportResponsesWebsocketV2}, true, "", "", "client-session", "", "")
+					require.NoError(t, err)
+				} else {
+					var req *http.Request
+					var err error
+					if transport == "http" {
+						req, err = svc.buildUpstreamRequest(context.Background(), c, account, body, "fixture-token", true, "client-session", true)
+					} else {
+						req, err = svc.buildUpstreamRequestOpenAIPassthrough(context.Background(), c, account, body, "fixture-token")
+					}
+					require.NoError(t, err)
+					headers = req.Header
+				}
+				require.Equal(t, isolateOpenAISessionID(id, "client-session"), headers.Get("session-id"))
+				require.Equal(t, headers.Get("session-id"), headers.Get("session_id"))
+				if headers.Get("conversation_id") != "" {
+					require.Equal(t, headers.Get("session-id"), headers.Get("conversation_id"))
+				}
+				require.Equal(t, isolateOpenAISessionID(id, "client-thread"), headers.Get("thread-id"))
+				require.Equal(t, headers.Get("thread-id"), headers.Get("x-client-request-id"))
+				snapshots = append(snapshots, headers)
+			}
+			require.NotEqual(t, snapshots[0].Get("session-id"), snapshots[1].Get("session-id"))
+			require.NotEqual(t, snapshots[0].Get("thread-id"), snapshots[1].Get("thread-id"))
+		})
+	}
+}
+
+func TestCodexDebugUpstreamForwardBypassesAccountProxy(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, mode := range []string{"http", "passthrough", "alpha-fallback", "chat", "messages", "images"} {
+		t.Run(mode, func(t *testing.T) {
+			const target = "http://127.0.0.1:9977/backend-api/codex/responses"
+			body := []byte(`{"model":"gpt-5.6-codex","stream":false,"instructions":"test","input":"hello"}`)
+			c, _ := gin.CreateTestContext(httptest.NewRecorder())
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+			upstream := &httpUpstreamRecorder{resp: &http.Response{StatusCode: http.StatusBadRequest, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(bytes.NewBufferString(`{"error":{"message":"fixture rejection"}}`))}}
+			svc := &OpenAIGatewayService{cfg: &config.Config{Gateway: config.GatewayConfig{DebugCodexUpstreamURL: target}}, httpUpstream: upstream}
+			proxyID := int64(1)
+			account := &Account{ID: 11, Platform: PlatformOpenAI, Type: AccountTypeOAuth, ProxyID: &proxyID, Proxy: &Proxy{Protocol: "http", Host: "127.0.0.1", Port: 9999}, Credentials: map[string]any{"access_token": "fixture-token", "chatgpt_account_id": "fixture-account"}}
+			switch mode {
+			case "http":
+				_, _ = svc.Forward(context.Background(), c, account, body)
+			case "passthrough":
+				account.Credentials["openai_oauth_passthrough"] = true
+				_, _ = svc.Forward(context.Background(), c, account, body)
+			case "chat":
+				_, _ = svc.ForwardAsChatCompletions(context.Background(), c, account, []byte(`{"model":"gpt-5.6-codex","messages":[{"role":"user","content":"hello"}]}`), "", "")
+			case "messages":
+				_, _ = svc.ForwardAsAnthropic(context.Background(), c, account, []byte(`{"model":"gpt-5.6-codex","max_tokens":10,"messages":[{"role":"user","content":"hello"}]}`), "", "")
+			case "images":
+				_, _ = svc.forwardOpenAIImagesOAuth(context.Background(), c, account, &OpenAIImagesRequest{Model: "gpt-image-2", Prompt: "test", N: 1}, "")
+			case "alpha-fallback":
+				_, _ = svc.forwardAlphaSearchViaResponsesWebSearch(context.Background(), c, account, []byte(`{"id":"test","commands":{"search_query":[{"q":"test"}]}}`), "fixture-token", "gpt-5.6-codex", "gpt-5.6-codex")
+			}
+			require.NotNil(t, upstream.lastReq)
+			require.Equal(t, target, upstream.lastReq.URL.String())
+			require.Equal(t, "127.0.0.1:9977", upstream.lastReq.Host)
+			require.Empty(t, upstream.lastProxyURL)
+			var wire bytes.Buffer
+			require.NoError(t, upstream.lastReq.WriteProxy(&wire))
+			require.Contains(t, wire.String(), "POST "+target+" HTTP/1.1\r\n")
+		})
+	}
+}
+
+type codexDebugCaptureDialer struct {
+	conn          openAIWSClientConn
+	target, proxy string
+}
+
+func (d *codexDebugCaptureDialer) Dial(_ context.Context, target string, _ http.Header, proxy string) (openAIWSClientConn, int, http.Header, error) {
+	d.target, d.proxy = target, proxy
+	return d.conn, http.StatusSwitchingProtocols, nil, nil
+}
+
+func TestCodexDebugUpstreamWSBypassesAccountProxy(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	cfg := newOpenAIWSV2TestConfig()
+	cfg.Gateway.DebugCodexUpstreamURL = "http://127.0.0.1:9977/backend-api/codex/responses"
+	dialer := &codexDebugCaptureDialer{conn: &openAIWSCaptureConn{events: [][]byte{[]byte(`{"type":"response.completed","response":{"id":"resp_debug","model":"gpt-5.1","output":[],"usage":{"input_tokens":1,"output_tokens":1}}}`)}}}
+	pool := newOpenAIWSConnPool(cfg)
+	pool.setClientDialerForTest(dialer)
+	t.Cleanup(pool.Close)
+	svc := &OpenAIGatewayService{cfg: cfg, openaiWSPool: pool, openaiWSResolver: NewOpenAIWSProtocolResolver(cfg), httpUpstream: &httpUpstreamRecorder{}, cache: &stubGatewayCache{}, toolCorrector: NewCodexToolCorrector()}
+	proxyID := int64(1)
+	account := &Account{ID: 11, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Concurrency: 1, ProxyID: &proxyID, Proxy: &Proxy{Protocol: "http", Host: "127.0.0.1", Port: 9999}, Credentials: map[string]any{"access_token": "fixture-token", "chatgpt_account_id": "fixture"}, Extra: map[string]any{"responses_websockets_v2_enabled": true}}
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	result, err := svc.Forward(context.Background(), c, account, []byte(`{"model":"gpt-5.1","stream":false,"input":"hello"}`))
+	require.NoError(t, err)
+	require.True(t, result.OpenAIWSMode)
+	require.Equal(t, "ws://127.0.0.1:9977/backend-api/codex/responses", dialer.target)
+	require.Empty(t, dialer.proxy)
+	// Disabling the override or using an API-key account preserves the configured proxy.
+	account.Type = AccountTypeAPIKey
+	require.Equal(t, account.Proxy.URL(), svc.openAIResponsesProxyURL(account))
+	account.Type = AccountTypeOAuth
+	cfg.Gateway.DebugCodexUpstreamURL = ""
+	require.Equal(t, account.Proxy.URL(), svc.openAIResponsesProxyURL(account))
+}
+
+func TestCodexLegacyImplicitPlatformIdentityAndProxy(t *testing.T) {
+	account := &Account{Type: AccountTypeOAuth}
+	headers := http.Header{}
+	headers.Set("session-id", "session")
+	applyCodexAccountIdentityHeaders(headers, account, 77)
+	finalizeCodexOutboundIdentityHeaders(headers, account)
+	require.Equal(t, isolateOpenAISessionID(77, "session"), headers.Get("session-id"))
+	require.Equal(t, headers.Get("session-id"), headers.Get("session_id"))
+	proxyID := int64(1)
+	account.ProxyID, account.Proxy = &proxyID, &Proxy{Protocol: "http", Host: "127.0.0.1", Port: 9999}
+	svc := &OpenAIGatewayService{cfg: &config.Config{Gateway: config.GatewayConfig{DebugCodexUpstreamURL: "http://127.0.0.1:9977"}}}
+	require.Empty(t, svc.openAIResponsesProxyURL(account))
+}
