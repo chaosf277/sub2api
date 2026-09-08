@@ -86,6 +86,17 @@ func (s *OpenAIGatewayService) chatGPTCodexURL() string {
 	return resolveChatGPTCodexURL(s.cfg)
 }
 
+// Debug Responses traffic must stay on the gateway host, not the account proxy.
+func (s *OpenAIGatewayService) openAIResponsesProxyURL(account *Account) string {
+	if account == nil {
+		return ""
+	}
+	if isCodexOAuthIdentityAccount(account) && s != nil && s.cfg != nil && strings.TrimSpace(s.cfg.Gateway.DebugCodexUpstreamURL) != "" {
+		return ""
+	}
+	return resolveAccountProxyURL(account)
+}
+
 // OpenAI allowed headers whitelist (for non-passthrough).
 var openaiAllowedHeaders = map[string]bool{
 	"accept-language":         true,

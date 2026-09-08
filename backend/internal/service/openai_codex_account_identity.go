@@ -162,8 +162,35 @@ func applyCodexAccountIdentityEmbeddedMetadata(values map[string]any, account *A
 	return true
 }
 
+func isCodexOAuthIdentityAccount(account *Account) bool {
+	return account != nil && (account.IsOpenAIOAuthLike() || (account.Platform == "" && account.Type == AccountTypeOAuth))
+}
+
+func isolateCodexAccountIdentityFieldsByAPIKey(values map[string]any, apiKeyID int64) bool {
+	if values == nil {
+		return false
+	}
+	changed := false
+	for _, field := range codexAccountIdentityFields {
+		raw, ok := values[field.name].(string)
+		if !ok {
+			continue
+		}
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		next := isolateOpenAISessionID(apiKeyID, raw)
+		if next != raw {
+			values[field.name] = next
+			changed = true
+		}
+	}
+	return changed
+}
+
 func applyCodexAccountIdentityClientMetadataMap(requestBody map[string]any, account *Account, apiKeyID int64) bool {
-	if requestBody == nil || codexAccountIdentityNamespace(account) == "" {
+	if requestBody == nil || !isCodexOAuthIdentityAccount(account) || codexAccountIdentityNamespace(account) == "" {
 		return false
 	}
 	changed := false
@@ -196,7 +223,7 @@ func applyCodexAccountIdentityClientMetadataMap(requestBody map[string]any, acco
 // subobjects with gjson/sjson. The passthrough hot path never unmarshals the
 // potentially multi-megabyte request body.
 func applyCodexAccountIdentityClientMetadataRaw(body []byte, account *Account, apiKeyID int64) ([]byte, bool, error) {
-	if len(body) == 0 || codexAccountIdentityNamespace(account) == "" {
+	if len(body) == 0 || !isCodexOAuthIdentityAccount(account) || codexAccountIdentityNamespace(account) == "" {
 		return body, false, nil
 	}
 	root := gjson.ParseBytes(body)
@@ -250,7 +277,27 @@ func applyCodexAccountIdentityClientMetadataRaw(body []byte, account *Account, a
 }
 
 func applyCodexAccountIdentityHeaders(headers http.Header, account *Account, apiKeyID int64) {
-	if headers == nil || codexAccountIdentityNamespace(account) == "" {
+	if headers == nil || !isCodexOAuthIdentityAccount(account) {
+		return
+	}
+	// Legacy OAuth accounts may lack a credential namespace; retain API-key isolation.
+	if codexAccountIdentityNamespace(account) == "" {
+		for _, field := range codexAccountIdentityFields {
+			if field.name == "session_id" {
+				continue
+			}
+			if raw := strings.TrimSpace(headers.Get(field.name)); raw != "" {
+				headers.Set(field.name, isolateOpenAISessionID(apiKeyID, raw))
+			}
+		}
+		if raw := strings.TrimSpace(headers.Get(openAIWSTurnMetadataHeader)); raw != "" {
+			metadata := map[string]any{}
+			if err := json.Unmarshal([]byte(raw), &metadata); err == nil && metadata != nil && isolateCodexAccountIdentityFieldsByAPIKey(metadata, apiKeyID) {
+				if rebuilt, err := json.Marshal(metadata); err == nil {
+					headers.Set(openAIWSTurnMetadataHeader, string(rebuilt))
+				}
+			}
+		}
 		return
 	}
 	for _, field := range codexAccountIdentityFields {
@@ -282,7 +329,7 @@ func applyCodexAccountIdentityHeaders(headers http.Header, account *Account, api
 // aliases for older relays and cross-user isolation; they must reuse the
 // already-scoped hyphen session-id instead of a second hash.
 func finalizeCodexOutboundIdentityHeaders(headers http.Header, account *Account) {
-	if headers == nil || codexAccountIdentityNamespace(account) == "" {
+	if headers == nil || !isCodexOAuthIdentityAccount(account) {
 		return
 	}
 	if sessionID := strings.TrimSpace(headers.Get("session-id")); sessionID != "" {
