@@ -152,6 +152,8 @@ frontend/coverage/
 aicodex
 output/
 .codegraph/
+.gitnexus
+.trellis
 
 # Vitest / Vite cache at repo root
 .vite/

@@ -569,7 +569,7 @@ func TestCodexDebugUpstreamForwardBypassesAccountProxy(t *testing.T) {
 			case "messages":
 				_, _ = svc.ForwardAsAnthropic(context.Background(), c, account, []byte(`{"model":"gpt-5.6-codex","max_tokens":10,"messages":[{"role":"user","content":"hello"}]}`), "", "")
 			case "images":
-				_, _ = svc.forwardOpenAIImagesOAuth(context.Background(), c, account, &OpenAIImagesRequest{Model: "gpt-image-2", Prompt: "test", N: 1}, "")
+				_, _ = svc.forwardOpenAIImagesOAuth(context.Background(), c, account, &OpenAIImagesRequest{Model: "gpt-image-1", Prompt: "test", N: 1}, "")
 			case "alpha-fallback":
 				_, _ = svc.forwardAlphaSearchViaResponsesWebSearch(context.Background(), c, account, []byte(`{"id":"test","commands":{"search_query":[{"q":"test"}]}}`), "fixture-token", "gpt-5.6-codex", "gpt-5.6-codex")
 			}

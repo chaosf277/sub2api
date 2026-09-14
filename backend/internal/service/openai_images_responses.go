@@ -1828,7 +1828,7 @@ func (s *OpenAIGatewayService) forwardOpenAIImagesOAuth(
 		responsesBody, targetURL, err = buildOpenAIImagesOAuthPayload(parsed, upstreamModel)
 	} else {
 		responsesBody, err = buildOpenAIImagesResponsesRequest(parsed, upstreamModel)
-		targetURL = chatgptCodexURL
+		targetURL = s.chatGPTCodexURL()
 	}
 	if err != nil {
 		return nil, err
