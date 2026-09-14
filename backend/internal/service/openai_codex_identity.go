@@ -199,6 +199,29 @@ func applyOpenAICodexProbeHeaders(h http.Header) {
 	h.Set("X-Codex-Window-ID", uuid.NewString())
 }
 
+// applyOpenAICodexProbeIdentity gives synthetic Responses probes the same final
+// identity ordering as forwarding. Probe payloads contain no client_metadata.
+// Fingerprint policy belongs to the selected row; namespacing and UA belong to
+// the resolved credential account (which may be a shadow's parent).
+func applyOpenAICodexProbeIdentity(h http.Header, account, credentialAccount *Account) {
+	if !isCodexOAuthIdentityAccount(credentialAccount) {
+		return
+	}
+	if sessionID := extractClientSessionID(h); sessionID != "" {
+		h.Set("session-id", sessionID)
+	} else {
+		h.Set("session-id", uuid.NewString())
+	}
+	if strings.TrimSpace(h.Get("thread-id")) == "" {
+		h.Set("thread-id", uuid.NewString())
+	}
+	ids := resolveCodexFingerprintIDsFromRequest(account, h)
+	applyCodexAccountIdentityHeaders(h, credentialAccount, 0)
+	applyCodexFingerprintHeaders(h, ids)
+	finalizeCodexOutboundIdentityHeaders(h, credentialAccount)
+	enforceCodexIdentityHeadersWithUA(h, credentialAccount.GetOpenAIUserAgent())
+}
+
 // enforceCodexIdentityHeaders 收口 OAuth（ChatGPT 内部接口）出站请求的客户端身份头。
 // 见 enforceCodexIdentityHeadersWithUA；无账号级自定义 User-Agent 时使用本函数。
 func enforceCodexIdentityHeaders(h http.Header) {

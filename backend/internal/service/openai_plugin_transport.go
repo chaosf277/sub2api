@@ -43,3 +43,14 @@ func (s *AccountTestService) doOpenAIAccountTestUpstream(
 	}
 	return s.httpUpstream.Do(request, proxyURL, account.ID, account.Concurrency)
 }
+
+// Quota probes use the same plugin routing and TLS fallback as account tests.
+func (s *AccountUsageService) doOpenAIUsageProbeUpstream(request *http.Request, proxyURL string, account *Account) (*http.Response, error) {
+	if s.pluginManager != nil {
+		response, handled, err := s.pluginManager.RoundTripOpenAIOAuth(request.Context(), request, proxyURL, account)
+		if handled {
+			return response, err
+		}
+	}
+	return s.httpUpstream.DoWithTLS(request, proxyURL, account.ID, account.Concurrency, s.tlsFPProfileService.ResolveTLSProfile(account))
+}
