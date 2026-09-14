@@ -32,6 +32,8 @@ IMAGE_NAME="ghcr.io/${GITHUB_OWNER_LOWER}/sub2api"
 TAG="${1:-latest}"
 PLATFORMS="${2:-linux/amd64,linux/arm64}"
 COMMIT=$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || echo "unknown")
+# Resolve before Docker excludes .git from the build context.
+VERSION=$(sh "${REPO_ROOT}/backend/scripts/resolve-version.sh")
 
 echo "=========================================="
 echo "准备构建并发布镜像到 GHCR"
@@ -63,6 +65,7 @@ docker buildx build \
     -t "${IMAGE_NAME}:${COMMIT}" \
     --build-arg GOPROXY=https://proxy.golang.org,direct \
     --build-arg COMMIT="${COMMIT}" \
+    --build-arg VERSION="${VERSION}" \
     --push \
     -f "${REPO_ROOT}/Dockerfile" \
     "${REPO_ROOT}"
